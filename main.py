@@ -21,6 +21,10 @@ from keras.preprocessing.image import ImageDataGenerator
 from keras.utils.training_utils import multi_gpu_model
 from keras.layers.merge import concatenate
 
+from data_loader import train_data_loader
+from sklearn.model_selection import train_test_split
+from triplets import TripletGenerator
+
 from keras.layers import (
     Input,
     Activation,
@@ -151,7 +155,8 @@ def get_feature(model, queries, db):
     img_size = (224, 224)
     test_path = DATASET_PATH + '/test/test_data'
 
-    intermediate_layer_model = Model(inputs=model.input, outputs=model.layers[-2].output)
+    intermediate_layer_model = Model(inputs=model.get_layer('x').input, outputs=model.get_layer('embedded_value').output)
+    intermediate_layer_model.trainable = False
     test_datagen = ImageDataGenerator(rescale=1. / 255,samplewise_std_normalization=True,dtype='float32')
     query_generator = test_datagen.flow_from_directory(
         directory=test_path,
@@ -220,22 +225,50 @@ if __name__ == '__main__':
     batch_size = config.batch_size
     num_classes = config.num_classes
     input_shape = (224, 224, 3)  # input image shape
-    image_input = Input(input_shape)
+    # image_input = Input(input_shape)
     """ Model """
     print('------------dddd----------------')
-    model1 = applications.inception_resnet_v2.InceptionResNetV2(input_tensor= image_input, include_top= False, classes=num_classes, weights= 'imagenet', input_shape=input_shape)
+    model1 = applications.inception_resnet_v2.InceptionResNetV2(input_tensor= None, include_top= False, classes=num_classes, weights= 'imagenet', input_shape=input_shape)
+    # Receive 3 inputs
+        # Decide which of the two alternatives is closest to the original
+        # x  - Original Image
+        # x1 - Alternative 1
+        # x2 - Alternative 2
+    x = Input(shape=input_shape, name='x')
+    x1 = Input(shape=input_shape, name='x1')
+    x2 = Input(shape=input_shape, name='x2')
+
+    # last layer
     last_layer = model1.output
-    x1 = GlobalAveragePooling2D()(last_layer)
+    x1 = GlobalAveragePooling2D(name='embedded_value')(last_layer)
+
+    # Get the embedded values
+    e = model1.input(x)
+    e1 = model1.input(x1)
+    e2 = model1.input(x2)
+
+    # Get the differences
+    d1 = subtract(e, e1)
+    d2 = subtract(e, e2)
+
+    # Normalize the differences
+    n1 = norm(d1)
+    n2 = norm(d2)
+
+    # Compare
+    out = Activation('sigmoid')(subtract(n2, n1)) # TODO relu
+    model = Model(inputs=[x, x1, x2], outputs= out)
+    
     #x1 = Lambda(lambda x: x * 2)(x1)
     #x2 = GlobalMaxPooling2D()(last_layer)
     # model2 = applications.densenet.DenseNet121(input_tensor= image_input, include_top= False,pooling='max', classes=num_classes, weights= 'imagenet', input_shape=input_shape)
     #concatenated = concatenate([x1, x2])
-    predictions = Dense(num_classes, activation='softmax')(x1)
-    model = Model(inputs=image_input, outputs=predictions)
+    # predictions = Dense(num_classes, activation='softmax')(x1)
+    # model = Model(inputs=image_input, outputs=predictions)
     # model.trainable = False
     # model.layers[-1].trainable = True
     # model.layers[1].trainable = False
-    # model = multi_gpu_model(model, gpus=2)
+    model = multi_gpu_model(model, gpus=2)
     model.summary()
     bind_model(model)
 
@@ -247,56 +280,67 @@ if __name__ == '__main__':
         bTrainmode = True
 
         """ Initiate RMSprop optimizer """
-        model.compile(loss='categorical_crossentropy',
+        model.compile(loss='mean_squared_error',
                       optimizer='adam',
                       metrics=['accuracy'])
 
         print('dataset path', DATASET_PATH)
 
-        train_datagen = ImageDataGenerator(
-            rescale=1. / 255,
-            samplewise_std_normalization=True,
-            validation_split=0.2)
+        x_train = np.asarray(img_list)
+        labels = np.asarray(label_list)
+        y_train = keras.utils.to_categorical(labels, num_classes=num_classes)
+        x_train = x_train.astype('float32')
+        # x_train /= 255
 
-        # rescale=1. / 255,
+        x_train, x_test, y_train, y_test = train_test_split(x_train, y_train, test_size=0.2, random_state=42)
 
-        train_generator = train_datagen.flow_from_directory(
-            directory=DATASET_PATH + '/train/train_data',
-            target_size=input_shape[:2],
-            color_mode="rgb",
-            batch_size=batch_size,
-            class_mode="categorical",
-            shuffle=True,
-            seed=42,
-            subset='training'
-        )
+        gen = TripletGenerator()
+        train_stream = gen.flow(x_train, y_train, batch_size=batch_size)
+        valid_stream = gen.flow(x_valid, y_valid, batch_size=batch_size)
+        
+        # train_datagen = ImageDataGenerator(
+        #     rescale=1. / 255,
+        #     samplewise_std_normalization=True,
+        #     validation_split=0.2)
 
-        validation_generator = train_datagen.flow_from_directory(
-            directory=DATASET_PATH + '/train/train_data',
-            target_size=input_shape[:2],
-            color_mode="rgb",
-            batch_size=batch_size,
-            class_mode="categorical",
-            shuffle=True,
-            seed=42,
-            subset='validation'
-        )
+
+        # train_generator = train_datagen.flow_from_directory(
+        #     directory=DATASET_PATH + '/train/train_data',
+        #     target_size=input_shape[:2],
+        #     color_mode="rgb",
+        #     batch_size=batch_size,
+        #     class_mode="categorical",
+        #     shuffle=True,
+        #     seed=42,
+        #     subset='training'
+        # )
+
+        # validation_generator = train_datagen.flow_from_directory(
+        #     directory=DATASET_PATH + '/train/train_data',
+        #     target_size=input_shape[:2],
+        #     color_mode="rgb",
+        #     batch_size=batch_size,
+        #     class_mode="categorical",
+        #     shuffle=True,
+        #     seed=42,
+        #     subset='validation'
+        # )
 
 
         """ Training loop """
-        STEP_SIZE_TRAIN = train_generator.n // train_generator.batch_size
-        STEP_SIZE_VALIDATION = validation_generator.n // validation_generator.batch_size
+        STEP_SIZE_TRAIN = train_stream.n // train_stream.batch_size
+        STEP_SIZE_VALIDATION = valid_stream.n // valid_stream.batch_size
         t0 = time.time()
         for epoch in range(nb_epoch):
             t1 = time.time()
-            res = model.fit_generator(generator=train_generator,
+            res = model.fit_generator(generator=train_stream,
                                       steps_per_epoch=STEP_SIZE_TRAIN,
-                                      validation_data=validation_generator,
+                                      validation_data=valid_stream,
                                       validation_steps=STEP_SIZE_VALIDATION,
                                       initial_epoch=epoch,
                                       epochs=epoch + 1,
                                       callbacks=[lr_reducer, early_stopper],
-                                      verbose=2,
+                                      verbose=1,
                                       shuffle=True)
             t2 = time.time()
             print(res.history)
