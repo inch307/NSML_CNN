@@ -89,60 +89,61 @@ def bind_model(model):
 #         return v
 #     return v / norm
 
-# def l2_normalize(v, k):
-#     norm = np.linalg.norm(v)
-#     if norm == 0:
-#         return v
-#     lst = []
-#     for i in v:
-#         real_norm = np.linalg.norm(i) / k
-#         if real_norm == 0:
-#             lst.append(i)
-#         else: lst.append(i / real_norm)
-#     normed_v = np.array(lst)
-#     return normed_v
-
 def l2_normalize(v):
     norm = np.linalg.norm(v)
     if norm == 0:
         return v
     lst = []
     for i in v:
-        lstAvg = []
-        lstMax = []
-        length = len(i) / 2
-        avgVec = i[0:length]
-        maxVec = i[length:]
-        real_norm_avg = np.linalg.norm(avgVec)
-        real_norm_max = np.linalg.norm(maxVec)
-        if real_norm_avg == 0 and real_norm_max == 0:
-            avgVec /= 1
-            avgVec *= 2
-            maxVec /= 1
-            vec = np.concatenate((avgVec, maxVec), axis=0)
-            lst.append(vec)
-
-        elif real_norm_max == 0:
-            avgVec /= real_norm_avg
-            avgVec *= 2
-            maxVec /= 1
-            vec = np.concatenate((avgVec, maxVec), axis=0)
-            lst.append(vec)
-
-        elif real_norm_avg == 0:
-            avgVec /= 1
-            maxVec /= real_norm_max
-            vec = np.concatenate((avgVec, maxVec), axis=0)
-            lst.append(vec)
-
-        else: 
-            avgVec /= real_norm_avg
-            avgVec *= 2
-            maxVec /= real_norm_max
-            vec = np.concatenate((avgVec, maxVec), axis=0)
-            lst.append(vec)
+        real_norm = np.linalg.norm(i)
+        if real_norm == 0:
+            lst.append(i)
+        else: lst.append(i / real_norm)
     normed_v = np.array(lst)
     return normed_v
+
+# def l2_normalize(v):
+#     norm = np.linalg.norm(v)
+#     if norm == 0:
+#         return v
+#     lst = []
+#     for i in v:
+#         half = np.split(i, 2)
+#         lstAvg = []
+#         lstMax = []
+#         length = len(i) / 2
+#         avgVec = half[0]
+#         maxVec = half[1]
+#         real_norm_avg = np.linalg.norm(avgVec)
+#         real_norm_max = np.linalg.norm(maxVec)
+#         if real_norm_avg == 0 and real_norm_max == 0:
+#             avgVec /= 1
+#             avgVec *= 2
+#             maxVec /= 1
+#             vec = np.concatenate((avgVec, maxVec), axis=0)
+#             lst.append(vec)
+
+#         elif real_norm_max == 0:
+#             avgVec /= real_norm_avg
+#             avgVec *= 2
+#             maxVec /= 1
+#             vec = np.concatenate((avgVec, maxVec), axis=0)
+#             lst.append(vec)
+
+#         elif real_norm_avg == 0:
+#             avgVec /= 1
+#             maxVec /= real_norm_max
+#             vec = np.concatenate((avgVec, maxVec), axis=0)
+#             lst.append(vec)
+
+#         else: 
+#             avgVec /= real_norm_avg
+#             avgVec *= 2
+#             maxVec /= real_norm_max
+#             vec = np.concatenate((avgVec, maxVec), axis=0)
+#             lst.append(vec)
+#     normed_v = np.array(lst)
+#     return normed_v
 
 
 # data preprocess
@@ -151,7 +152,7 @@ def get_feature(model, queries, db):
     test_path = DATASET_PATH + '/test/test_data'
 
     intermediate_layer_model = Model(inputs=model.input, outputs=model.layers[-2].output)
-    test_datagen = ImageDataGenerator(rescale=1. / 255, dtype='float32')
+    test_datagen = ImageDataGenerator(rescale=1. / 255,samplewise_std_normalization=True,dtype='float32')
     query_generator = test_datagen.flow_from_directory(
         directory=test_path,
         target_size=(224, 224),
@@ -210,6 +211,7 @@ if __name__ == '__main__':
     model.summary()
     model = applications.mobilenet_v2.MobileNetV2(input_tensor= image_input, include_top= True, weights= 'imagenet')
     applications.inception_resnet_v2.InceptionResNetV2
+    applications.inception_v3.InceptionV3
     model.summary()
     '''
 
@@ -221,15 +223,18 @@ if __name__ == '__main__':
     image_input = Input(input_shape)
     """ Model """
     print('------------dddd----------------')
-    model1 = applications.mobilenet_v2.MobileNetV2(input_tensor= image_input, include_top= False, classes=num_classes, weights= 'imagenet', input_shape=input_shape)
+    model1 = applications.inception_resnet_v2.InceptionResNetV2(input_tensor= image_input, include_top= False, classes=num_classes, weights= 'imagenet', input_shape=input_shape)
     last_layer = model1.output
     x1 = GlobalAveragePooling2D()(last_layer)
-    x1 = Lambda(lambda x: x * 2)(x1)
-    x2 = GlobalMaxPooling2D()(last_layer)
+    #x1 = Lambda(lambda x: x * 2)(x1)
+    #x2 = GlobalMaxPooling2D()(last_layer)
     # model2 = applications.densenet.DenseNet121(input_tensor= image_input, include_top= False,pooling='max', classes=num_classes, weights= 'imagenet', input_shape=input_shape)
-    concatenated = concatenate([x1, x2])
-    predictions = Dense(num_classes, activation='softmax')(concatenated)
+    #concatenated = concatenate([x1, x2])
+    predictions = Dense(num_classes, activation='softmax')(x1)
     model = Model(inputs=image_input, outputs=predictions)
+    # model.trainable = False
+    # model.layers[-1].trainable = True
+    # model.layers[1].trainable = False
     # model = multi_gpu_model(model, gpus=2)
     model.summary()
     bind_model(model)
@@ -250,7 +255,10 @@ if __name__ == '__main__':
 
         train_datagen = ImageDataGenerator(
             rescale=1. / 255,
-            validation_split=0.05)
+            samplewise_std_normalization=True,
+            validation_split=0.2)
+
+        # rescale=1. / 255,
 
         train_generator = train_datagen.flow_from_directory(
             directory=DATASET_PATH + '/train/train_data',
