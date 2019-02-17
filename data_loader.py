@@ -6,7 +6,7 @@ from __future__ import print_function
 import os
 import cv2
 import pickle
-
+#
 
 def train_data_loader(data_path, img_size, output_path):
     label_list = []
