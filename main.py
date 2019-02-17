@@ -6,6 +6,9 @@ from __future__ import print_function
 import os
 import argparse
 import time
+import cv2
+import pickle
+import dask.array as da
 
 import nsml
 import numpy as np
@@ -20,6 +23,7 @@ from keras.callbacks import ReduceLROnPlateau, EarlyStopping
 from keras.preprocessing.image import ImageDataGenerator
 from keras.utils.training_utils import multi_gpu_model
 from keras.layers.merge import concatenate
+from keras import backend as K
 
 from data_loader import train_data_loader
 from sklearn.model_selection import train_test_split
@@ -37,6 +41,7 @@ from keras.layers import (
     Multiply,
     Lambda
 )
+from custom_layers import subtract, norm
 
 lr_reducer = ReduceLROnPlateau(factor=np.sqrt(0.1), cooldown=0, patience=5, min_lr=0.5e-6)
 early_stopper = EarlyStopping(min_delta=0.001, patience=20)
@@ -155,9 +160,9 @@ def get_feature(model, queries, db):
     img_size = (224, 224)
     test_path = DATASET_PATH + '/test/test_data'
 
-    intermediate_layer_model = Model(inputs=model.get_layer('x').input, outputs=model.get_layer('embedded_value').output)
+    intermediate_layer_model = Model(inputs=model.get_layer('submit_input').input, outputs=model.get_layer('embedded_value').output)
     intermediate_layer_model.trainable = False
-    test_datagen = ImageDataGenerator(rescale=1. / 255,samplewise_std_normalization=True,dtype='float32')
+    test_datagen = ImageDataGenerator(rescale=1. / 255,dtype='float32')
     query_generator = test_datagen.flow_from_directory(
         directory=test_path,
         target_size=(224, 224),
@@ -220,15 +225,23 @@ if __name__ == '__main__':
     model.summary()
     '''
 
+    K.clear_session()
     # training parameters
     nb_epoch = config.epoch
     batch_size = config.batch_size
     num_classes = config.num_classes
     input_shape = (224, 224, 3)  # input image shape
-    # image_input = Input(input_shape)
+    image_input = Input(shape=input_shape, name='submit_input')
     """ Model """
     print('------------dddd----------------')
-    model1 = applications.inception_resnet_v2.InceptionResNetV2(input_tensor= None, include_top= False, classes=num_classes, weights= 'imagenet', input_shape=input_shape)
+    model1 = applications.inception_resnet_v2.InceptionResNetV2(input_tensor= image_input, include_top= False, classes=num_classes, weights= None, input_shape=input_shape)
+     # last layer
+    last_layer = model1.output
+    last_layer = GlobalAveragePooling2D(name='embedded_value')(last_layer)
+    model1 = Model(inputs=image_input, outputs= last_layer)
+    bind_model(model1)
+    nsml.load(checkpoint='0', session='Avian_Influenza/ir_ph2/151')
+    model1.summary()
     # Receive 3 inputs
         # Decide which of the two alternatives is closest to the original
         # x  - Original Image
@@ -238,14 +251,12 @@ if __name__ == '__main__':
     x1 = Input(shape=input_shape, name='x1')
     x2 = Input(shape=input_shape, name='x2')
 
-    # last layer
-    last_layer = model1.output
-    x1 = GlobalAveragePooling2D(name='embedded_value')(last_layer)
+    # mode1 = Model(inputs=model1.layers[0], outputs=last_layer)
 
     # Get the embedded values
-    e = model1.input(x)
-    e1 = model1.input(x1)
-    e2 = model1.input(x2)
+    e = model1(x)
+    e1 = model1(x1)
+    e2 = model1(x2)
 
     # Get the differences
     d1 = subtract(e, e1)
@@ -268,9 +279,10 @@ if __name__ == '__main__':
     # model.trainable = False
     # model.layers[-1].trainable = True
     # model.layers[1].trainable = False
-    model = multi_gpu_model(model, gpus=2)
+    # model = multi_gpu_model(model, gpus=2)
     model.summary()
     bind_model(model)
+    #nsml.save(0)
 
     if config.pause:
         nsml.paused(scope=locals())
@@ -285,18 +297,70 @@ if __name__ == '__main__':
                       metrics=['accuracy'])
 
         print('dataset path', DATASET_PATH)
+        output_path = ['./img_list.pkl', './label_list.pkl']
+        train_dataset_path = DATASET_PATH + '/train/train_data'
 
-        x_train = np.asarray(img_list)
-        labels = np.asarray(label_list)
-        y_train = keras.utils.to_categorical(labels, num_classes=num_classes)
-        x_train = x_train.astype('float32')
+        y_train = []
+        x_train = []
+        label_idx = 0
+        print('os walk')
+        ab = 0
+        for root, dirs, files in os.walk(train_dataset_path):
+            if not files:
+                continue
+            if ab < 10 :
+                print('root is')
+                print(root)
+                print('dirs is')
+                print(dirs)
+                print('files is')
+                print(files)
+                ab += 1
+            for filename in files:
+                img_path = os.path.join(root, filename)
+                try:
+                    img = cv2.imread(img_path, 1)
+                    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                    img = cv2.resize(img, input_shape[:2])
+                except:
+                    continue
+                y_train.append(label_idx)
+                x_train.append(img)
+            label_idx += 1
+        print('image loaded')
+
+        # with open(output_path[0], 'wb') as img_f:
+        #     pickle.dump(x_train, img_f)
+        # with open(output_path[1], 'wb') as label_f:
+        #     pickle.dump(y_train, label_f)
+        print('image cached')
+
+
+
+        x_train = np.asarray(x_train)
+        print('x_train assigned')
+        print(x_train.shape)
+        print(len(x_train))
+        y_train = np.asarray(y_train)  # TODO 1
+        print('labes assigned')
+        print(y_train.shape)
+        print(len(y_train))
+        print(y_train)
+        # y_train = keras.utils.to_categorical(y_train, num_classes=num_classes) # TODO 2
+        
+        print('y_train assigned')
+        # x_train = x_train.astype('float32')
         # x_train /= 255
 
-        x_train, x_test, y_train, y_test = train_test_split(x_train, y_train, test_size=0.2, random_state=42)
+        x_train, x_valid, y_train, y_valid = train_test_split(x_train, y_train, test_size=0.2, random_state=42)
+        print('split')
 
         gen = TripletGenerator()
+        print('gen')
         train_stream = gen.flow(x_train, y_train, batch_size=batch_size)
+        print('train_stream')
         valid_stream = gen.flow(x_valid, y_valid, batch_size=batch_size)
+        print('valid_stream')
         
         # train_datagen = ImageDataGenerator(
         #     rescale=1. / 255,
@@ -328,10 +392,12 @@ if __name__ == '__main__':
 
 
         """ Training loop """
-        STEP_SIZE_TRAIN = train_stream.n // train_stream.batch_size
-        STEP_SIZE_VALIDATION = valid_stream.n // valid_stream.batch_size
+        print(len(train_stream.classes))
+        STEP_SIZE_TRAIN = len(train_stream.classes) // train_stream.batch_size
+        STEP_SIZE_VALIDATION = len(train_stream.classes) // valid_stream.batch_size
         t0 = time.time()
         for epoch in range(nb_epoch):
+            print('current epoch is: ', nb_epoch)
             t1 = time.time()
             res = model.fit_generator(generator=train_stream,
                                       steps_per_epoch=STEP_SIZE_TRAIN,

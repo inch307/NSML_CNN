@@ -12,7 +12,8 @@ def train_data_loader(data_path, img_size, output_path):
     label_list = []
     img_list = []
     label_idx = 0
-
+    print('os walk is')
+    print(str(os.walk(data_path)))
     for root, dirs, files in os.walk(data_path):
         if not files:
             continue
@@ -27,13 +28,14 @@ def train_data_loader(data_path, img_size, output_path):
             label_list.append(label_idx)
             img_list.append(img)
         label_idx += 1
+    print('image loaded')
 
     # write output file for caching
-    with open(output_path[0], 'wb') as img_f:
-        pickle.dump(img_list, img_f)
-    with open(output_path[1], 'wb') as label_f:
-        pickle.dump(label_list, label_f)
-
+    # with open(output_path[0], 'wb') as img_f:
+    #     pickle.dump(img_list, img_f)
+    # with open(output_path[1], 'wb') as label_f:
+    #     pickle.dump(label_list, label_f)
+    # print('image cached')
 
 # nsml test_data_loader
 def test_data_loader(data_path):
