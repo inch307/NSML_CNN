@@ -102,8 +102,9 @@ def get_feature(model, queries, db):
     img_size = (224, 224)
     test_path = DATASET_PATH + '/test/test_data'
 
-    intermediate_layer_model = Model(inputs=model.input, outputs=model.layers[-2].output)
-    test_datagen = ImageDataGenerator(rescale=1. / 255,samplewise_std_normalization=True,dtype='float32')
+    intermediate_layer_model = Model(inputs=model.get_layer(model_1).input, outputs=model.get_layer(model_1).output)
+    intermediate_layer_model.trainable = False
+    test_datagen = ImageDataGenerator(rescale=1. / 255, dtype='float32')
     query_generator = test_datagen.flow_from_directory(
         directory=test_path,
         target_size=(224, 224),
@@ -245,7 +246,7 @@ if __name__ == '__main__':
     merged_outp = Concatenate(axis=-1)([anc_outp, pos_outp, neg_outp])
     model = Model(inputs=[anc_inp, pos_inp, neg_inp], outputs=merged_outp)
     adam_fine = Adam(lr=0.0001, beta_1=0.9, beta_2=0.999, epsilon=None, decay=0.0, amsgrad=False) #10x smaller than standard
-    model = multi_gpu_model(model, gpus=2)
+    # model = multi_gpu_model(model, gpus=2)
     model.compile(optimizer='adam', loss=lossless_triplet_loss)
       
     # model.trainable = False
@@ -254,6 +255,9 @@ if __name__ == '__main__':
     
     model.summary()
     bind_model(model)
+    nsml.load(checkpoint='7', session='Avian_Influenza/ir_ph2/198')
+    nsml.save('toSubmit')
+    exit()
 
     if config.pause:
         nsml.paused(scope=locals())
