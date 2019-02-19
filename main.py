@@ -256,8 +256,7 @@ if __name__ == '__main__':
     model.summary()
     bind_model(model)
     nsml.load(checkpoint='7', session='Avian_Influenza/ir_ph2/198')
-    nsml.save('toSubmit')
-    exit()
+
 
     if config.pause:
         nsml.paused(scope=locals())
@@ -265,6 +264,9 @@ if __name__ == '__main__':
     bTrainmode = False
     if config.mode == 'train':
         bTrainmode = True
+
+        nsml.save('toSubmit')
+        exit()
 
         """ Initiate RMSprop optimizer """
 
