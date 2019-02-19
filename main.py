@@ -2,13 +2,14 @@
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
-
+import tensorflow as tf
+import cv2
+import os
+import sys
+import random
 import os
 import argparse
 import time
-import cv2
-import pickle
-import dask.array as da
 
 import nsml
 import numpy as np
@@ -23,11 +24,7 @@ from keras.callbacks import ReduceLROnPlateau, EarlyStopping
 from keras.preprocessing.image import ImageDataGenerator
 from keras.utils.training_utils import multi_gpu_model
 from keras.layers.merge import concatenate
-from keras import backend as K
-
-from data_loader import train_data_loader
-from sklearn.model_selection import train_test_split
-from triplets import TripletGenerator
+from keras.optimizers import Adam
 
 from keras.layers import (
     Input,
@@ -41,10 +38,6 @@ from keras.layers import (
     Multiply,
     Lambda
 )
-from custom_layers import subtract, norm
-
-lr_reducer = ReduceLROnPlateau(factor=np.sqrt(0.1), cooldown=0, patience=5, min_lr=0.5e-6)
-early_stopper = EarlyStopping(min_delta=0.001, patience=20)
 
 def bind_model(model):
     def save(dir_name):
@@ -91,13 +84,6 @@ def bind_model(model):
     # DONOTCHANGE: They are reserved for nsml
     nsml.bind(save=save, load=load, infer=infer)
 
-
-# def l2_normalize(v):
-#     norm = np.linalg.norm(v)
-#     if norm == 0:
-#         return v
-#     return v / norm
-
 def l2_normalize(v):
     norm = np.linalg.norm(v)
     if norm == 0:
@@ -111,58 +97,13 @@ def l2_normalize(v):
     normed_v = np.array(lst)
     return normed_v
 
-# def l2_normalize(v):
-#     norm = np.linalg.norm(v)
-#     if norm == 0:
-#         return v
-#     lst = []
-#     for i in v:
-#         half = np.split(i, 2)
-#         lstAvg = []
-#         lstMax = []
-#         length = len(i) / 2
-#         avgVec = half[0]
-#         maxVec = half[1]
-#         real_norm_avg = np.linalg.norm(avgVec)
-#         real_norm_max = np.linalg.norm(maxVec)
-#         if real_norm_avg == 0 and real_norm_max == 0:
-#             avgVec /= 1
-#             avgVec *= 2
-#             maxVec /= 1
-#             vec = np.concatenate((avgVec, maxVec), axis=0)
-#             lst.append(vec)
-
-#         elif real_norm_max == 0:
-#             avgVec /= real_norm_avg
-#             avgVec *= 2
-#             maxVec /= 1
-#             vec = np.concatenate((avgVec, maxVec), axis=0)
-#             lst.append(vec)
-
-#         elif real_norm_avg == 0:
-#             avgVec /= 1
-#             maxVec /= real_norm_max
-#             vec = np.concatenate((avgVec, maxVec), axis=0)
-#             lst.append(vec)
-
-#         else: 
-#             avgVec /= real_norm_avg
-#             avgVec *= 2
-#             maxVec /= real_norm_max
-#             vec = np.concatenate((avgVec, maxVec), axis=0)
-#             lst.append(vec)
-#     normed_v = np.array(lst)
-#     return normed_v
-
-
 # data preprocess
 def get_feature(model, queries, db):
     img_size = (224, 224)
     test_path = DATASET_PATH + '/test/test_data'
 
-    intermediate_layer_model = Model(inputs=model.get_layer('submit_input').input, outputs=model.get_layer('embedded_value').output)
-    intermediate_layer_model.trainable = False
-    test_datagen = ImageDataGenerator(rescale=1. / 255,dtype='float32')
+    intermediate_layer_model = Model(inputs=model.input, outputs=model.layers[-2].output)
+    test_datagen = ImageDataGenerator(rescale=1. / 255,samplewise_std_normalization=True,dtype='float32')
     query_generator = test_datagen.flow_from_directory(
         directory=test_path,
         target_size=(224, 224),
@@ -187,6 +128,57 @@ def get_feature(model, queries, db):
                                                                 verbose=1)
 
     return queries, query_vecs, db, reference_vecs
+def triplet_gen(anchor_gen, gen):
+    while True:
+        anchors, y_anc = next(anchor_gen)
+        pos = np.empty(anchors.shape)
+        neg = np.empty(anchors.shape)
+        for sample_idx in range(anchors.shape[0]):
+            while pos[sample_idx].any() == None or neg[sample_idx].any() == None:
+                img, y = next(gen)
+                if y == y_anc[sample_idx]:
+                    pos[sample_idx,...] = img
+                else:
+                    neg[sample_idx,...] = img
+        yield [anchors, pos, neg], y_anc
+
+def lossless_triplet_loss(y_true, y_pred, N = 2, beta=2, epsilon=1e-10):
+    """
+    Implementation of the triplet loss function
+    
+    Arguments:
+    y_true -- true labels, required when you define a loss in Keras, you don't need it in this function.
+    y_pred -- python list containing three objects:
+            anchor -- the encodings for the anchor data
+            positive -- the encodings for the positive data (similar to anchor)
+            negative -- the encodings for the negative data (different from anchor)
+    N  --  The number of dimension 
+    beta -- The scaling factor, N is recommended
+    epsilon -- The Epsilon value to prevent ln(0)
+    
+    
+    Returns:
+    loss -- real number, value of the loss
+    """
+    anchor = tf.convert_to_tensor(y_pred[:,0:N])
+    positive = tf.convert_to_tensor(y_pred[:,N:N*2]) 
+    negative = tf.convert_to_tensor(y_pred[:,N*2:N*3])
+    
+    # distance between the anchor and the positive
+    pos_dist = tf.reduce_sum(tf.square(tf.subtract(anchor,positive)),1)
+    # distance between the anchor and the negative
+    neg_dist = tf.reduce_sum(tf.square(tf.subtract(anchor,negative)),1)
+    
+    #Non Linear Values  
+    
+    # -ln(-x/N+1)
+    pos_dist = -tf.log(-tf.divide((pos_dist),beta)+1+epsilon)
+    neg_dist = -tf.log(-tf.divide((N-neg_dist),beta)+1+epsilon)
+    
+    # compute loss
+    loss = neg_dist + pos_dist
+    
+    return loss
 
 
 if __name__ == '__main__':
@@ -194,7 +186,8 @@ if __name__ == '__main__':
 
     # hyperparameters
     args.add_argument('--epoch', type=int, default=200)
-    args.add_argument('--batch_size', type=int, default=64)
+    args.add_argument('--batch_size', type=int, default=16
+    )
     args.add_argument('--num_classes', type=int, default=1383)
 
     # DONOTCHANGE: They are reserved for nsml
@@ -224,65 +217,43 @@ if __name__ == '__main__':
     applications.inception_v3.InceptionV3
     model.summary()
     '''
-
-    K.clear_session()
     # training parameters
     nb_epoch = config.epoch
     batch_size = config.batch_size
     num_classes = config.num_classes
     input_shape = (224, 224, 3)  # input image shape
     image_input = Input(shape=input_shape, name='submit_input')
+    anc_inp = Input(shape=input_shape, name="anc_inp")
+    pos_inp = Input(shape=input_shape, name="pos_inp")
+    neg_inp = Input(shape=input_shape, name="neg_inp")
     """ Model """
     print('------------dddd----------------')
-    model1 = applications.inception_resnet_v2.InceptionResNetV2(input_tensor= image_input, include_top= False, classes=num_classes, weights= None, input_shape=input_shape)
+    model1 = applications.inception_resnet_v2.InceptionResNetV2(input_tensor= image_input, include_top= False, weights= None, input_shape=input_shape)
      # last layer
     last_layer = model1.output
     last_layer = GlobalAveragePooling2D(name='embedded_value')(last_layer)
     model1 = Model(inputs=image_input, outputs= last_layer)
     bind_model(model1)
     nsml.load(checkpoint='0', session='Avian_Influenza/ir_ph2/151')
-    model1.summary()
-    # Receive 3 inputs
-        # Decide which of the two alternatives is closest to the original
-        # x  - Original Image
-        # x1 - Alternative 1
-        # x2 - Alternative 2
-    x = Input(shape=input_shape, name='x')
-    x1 = Input(shape=input_shape, name='x1')
-    x2 = Input(shape=input_shape, name='x2')
-
-    # mode1 = Model(inputs=model1.layers[0], outputs=last_layer)
-
-    # Get the embedded values
-    e = model1(x)
-    e1 = model1(x1)
-    e2 = model1(x2)
-
-    # Get the differences
-    d1 = subtract(e, e1)
-    d2 = subtract(e, e2)
-
-    # Normalize the differences
-    n1 = norm(d1)
-    n2 = norm(d2)
-
-    # Compare
-    out = Activation('sigmoid')(subtract(n2, n1)) # TODO relu
-    model = Model(inputs=[x, x1, x2], outputs= out)
-    
     #x1 = Lambda(lambda x: x * 2)(x1)
     #x2 = GlobalMaxPooling2D()(last_layer)
     # model2 = applications.densenet.DenseNet121(input_tensor= image_input, include_top= False,pooling='max', classes=num_classes, weights= 'imagenet', input_shape=input_shape)
     #concatenated = concatenate([x1, x2])
-    # predictions = Dense(num_classes, activation='softmax')(x1)
-    # model = Model(inputs=image_input, outputs=predictions)
+    anc_outp = model1(anc_inp)
+    pos_outp = model1(pos_inp)
+    neg_outp = model1(neg_inp)
+    merged_outp = Concatenate(axis=-1)([anc_outp, pos_outp, neg_outp])
+    model = Model(inputs=[anc_inp, pos_inp, neg_inp], outputs=merged_outp)
+    adam_fine = Adam(lr=0.0001, beta_1=0.9, beta_2=0.999, epsilon=None, decay=0.0, amsgrad=False) #10x smaller than standard
+    model = multi_gpu_model(model, gpus=2)
+    model.compile(optimizer='adam', loss=lossless_triplet_loss)
+      
     # model.trainable = False
     # model.layers[-1].trainable = True
     # model.layers[1].trainable = False
-    # model = multi_gpu_model(model, gpus=2)
+    
     model.summary()
     bind_model(model)
-    #nsml.save(0)
 
     if config.pause:
         nsml.paused(scope=locals())
@@ -292,126 +263,79 @@ if __name__ == '__main__':
         bTrainmode = True
 
         """ Initiate RMSprop optimizer """
-        model.compile(loss='mean_squared_error',
-                      optimizer='adam',
-                      metrics=['accuracy'])
 
-        print('dataset path', DATASET_PATH)
-        output_path = ['./img_list.pkl', './label_list.pkl']
-        train_dataset_path = DATASET_PATH + '/train/train_data'
+        train_datagen = ImageDataGenerator(
+            rescale=1. / 255,
+            dtype='float32',
+            validation_split=0.2)
 
-        y_train = []
-        x_train = []
-        label_idx = 0
-        print('os walk')
-        ab = 0
-        for root, dirs, files in os.walk(train_dataset_path):
-            if not files:
-                continue
-            if ab < 10 :
-                print('root is')
-                print(root)
-                print('dirs is')
-                print(dirs)
-                print('files is')
-                print(files)
-                ab += 1
-            for filename in files:
-                img_path = os.path.join(root, filename)
-                try:
-                    img = cv2.imread(img_path, 1)
-                    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                    img = cv2.resize(img, input_shape[:2])
-                except:
-                    continue
-                y_train.append(label_idx)
-                x_train.append(img)
-            label_idx += 1
-        print('image loaded')
+        # rescale=1. / 255,
 
-        # with open(output_path[0], 'wb') as img_f:
-        #     pickle.dump(x_train, img_f)
-        # with open(output_path[1], 'wb') as label_f:
-        #     pickle.dump(y_train, label_f)
-        print('image cached')
+        anchor_train_generator = train_datagen.flow_from_directory(
+            directory=DATASET_PATH + '/train/train_data',
+            target_size=input_shape[:2],
+            color_mode="rgb",
+            batch_size=batch_size,
+            class_mode="categorical",
+            shuffle=True,
+            seed=42,
+            subset='training'
+        )
+        anchor_validation_generator = train_datagen.flow_from_directory(
+            directory=DATASET_PATH + '/train/train_data',
+            target_size=input_shape[:2],
+            color_mode="rgb",
+            batch_size=batch_size,
+            class_mode="categorical",
+            shuffle=True,
+            seed=42,
+            subset='validation'
+        )
+        train_generator = train_datagen.flow_from_directory(
+            directory=DATASET_PATH + '/train/train_data',
+            target_size=input_shape[:2],
+            color_mode="rgb",
+            batch_size=batch_size,
+            class_mode="categorical",
+            shuffle=True,
+            seed=42,
+            subset='training'
+        )
+        validation_generator = train_datagen.flow_from_directory(
+            directory=DATASET_PATH + '/train/train_data',
+            target_size=input_shape[:2],
+            color_mode="rgb",
+            batch_size=batch_size,
+            class_mode="categorical",
+            shuffle=True,
+            seed=42,
+            subset='validation'
+        )
 
-
-
-        x_train = np.asarray(x_train)
-        print('x_train assigned')
-        print(x_train.shape)
-        print(len(x_train))
-        y_train = np.asarray(y_train)  # TODO 1
-        print('labes assigned')
-        print(y_train.shape)
-        print(len(y_train))
-        print(y_train)
-        # y_train = keras.utils.to_categorical(y_train, num_classes=num_classes) # TODO 2
-        
-        print('y_train assigned')
-        # x_train = x_train.astype('float32')
-        # x_train /= 255
-
-        x_train, x_valid, y_train, y_valid = train_test_split(x_train, y_train, test_size=0.2, random_state=42)
-        print('split')
-
-        gen = TripletGenerator()
-        print('gen')
-        train_stream = gen.flow(x_train, y_train, batch_size=batch_size)
-        print('train_stream')
-        valid_stream = gen.flow(x_valid, y_valid, batch_size=batch_size)
-        print('valid_stream')
-        
-        # train_datagen = ImageDataGenerator(
-        #     rescale=1. / 255,
-        #     samplewise_std_normalization=True,
-        #     validation_split=0.2)
-
-
-        # train_generator = train_datagen.flow_from_directory(
-        #     directory=DATASET_PATH + '/train/train_data',
-        #     target_size=input_shape[:2],
-        #     color_mode="rgb",
-        #     batch_size=batch_size,
-        #     class_mode="categorical",
-        #     shuffle=True,
-        #     seed=42,
-        #     subset='training'
-        # )
-
-        # validation_generator = train_datagen.flow_from_directory(
-        #     directory=DATASET_PATH + '/train/train_data',
-        #     target_size=input_shape[:2],
-        #     color_mode="rgb",
-        #     batch_size=batch_size,
-        #     class_mode="categorical",
-        #     shuffle=True,
-        #     seed=42,
-        #     subset='validation'
-        # )
+        classes_1 = dict((v, k) for k, v in anchor_train_generator.class_indices.items())
+        num_classes_1 = len(classes_1)
 
 
         """ Training loop """
-        print(len(train_stream.classes))
-        STEP_SIZE_TRAIN = len(train_stream.classes) // train_stream.batch_size
-        STEP_SIZE_VALIDATION = len(train_stream.classes) // valid_stream.batch_size
+        STEP_SIZE_TRAIN = anchor_train_generator.n // anchor_train_generator.batch_size
+        print('step tr : ', STEP_SIZE_TRAIN)
+        print('len ', len(anchor_train_generator))
+        STEP_SIZE_VALIDATION = anchor_validation_generator.n // anchor_validation_generator.batch_size
         t0 = time.time()
         for epoch in range(nb_epoch):
-            print('current epoch is: ', nb_epoch)
             t1 = time.time()
-            res = model.fit_generator(generator=train_stream,
-                                      steps_per_epoch=STEP_SIZE_TRAIN,
-                                      validation_data=valid_stream,
-                                      validation_steps=STEP_SIZE_VALIDATION,
+            res = model.fit_generator(generator=triplet_gen(anchor_train_generator, train_generator),
+                                      steps_per_epoch=len(anchor_train_generator),
+                                      validation_data=triplet_gen(anchor_validation_generator, validation_generator),
+                                      validation_steps=len(anchor_validation_generator),
                                       initial_epoch=epoch,
                                       epochs=epoch + 1,
-                                      callbacks=[lr_reducer, early_stopper],
-                                      verbose=1,
+                                      verbose=2,
                                       shuffle=True)
             t2 = time.time()
             print(res.history)
             print('Training time for one epoch : %.1f' % ((t2 - t1)))
-            train_loss, train_acc = res.history['loss'][0], res.history['acc'][0]
-            nsml.report(summary=True, epoch=epoch, epoch_total=nb_epoch, loss=train_loss, acc=train_acc)
+            train_loss = res.history['loss'][0]
+            nsml.report(summary=True, epoch=epoch, epoch_total=nb_epoch, loss=train_loss)
             nsml.save(epoch)
         print('Total training time : %.1f' % (time.time() - t0))
